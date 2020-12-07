@@ -215,6 +215,12 @@ def bwa_index(fa):
             os.unlink(fa + ".amb")
         raise
 
+def minimap2_index(fa):
+    if is_newer_b(fa, fa + ".mmi"):
+        return
+    sys.stderr.write("indexing: %s\n" % fa)
+    run("minimap2 -I 20G -d %s.mmi %s" % (fa, fa))
+
 class Bam(object):
     __slots__ = 'read flag chrom pos mapq cigar chrom_mate pos_mate tlen \
             seq qual other'.split()
@@ -326,6 +332,25 @@ def bwa_mem(fa, fq_convert_cmd, extra_args, threads=1, rg=None,
     if paired:
         cmd += ("-U 100 -p ")
     cmd += "-R '{rg}' -t {threads} {extra_args} {conv_fa} -"
+    cmd = cmd.format(**locals())
+    sys.stderr.write("running: %s\n" % cmd.lstrip("|"))
+    as_bam(cmd, fa, set_as_failed)
+
+
+def minimap2(fa, fq_convert_cmd, threads=1, set_as_failed=None, rg=None):
+    conv_fa = convert_fasta(fa, just_name=True)
+    if not is_newer_b(conv_fa, conv_fa + ".mmi"):
+        raise BWAMethException("first run bwameth.py minimap2-index %s" % fa)
+
+    if not rg is None and not rg.startswith('@RG'):
+        rg = '@RG\\tID:{rg}\\tSM:{rg}'.format(rg=rg)
+
+    #starts the pipeline with the program to convert fastqs
+    cmd = ("|%s " % fq_convert_cmd)
+
+    # penalize clipping and unpaired. lower penalty on mismatches (-B)
+    cmd += "|minimap2 -ax map-ont -t {threads} -R '{rg}' -y {conv_fa}.mmi /dev/stdin"
+
     cmd = cmd.format(**locals())
     sys.stderr.write("running: %s\n" % cmd.lstrip("|"))
     as_bam(cmd, fa, set_as_failed)
@@ -469,6 +494,10 @@ def main(args=sys.argv[1:]):
         assert len(args) == 2, ("must specify fasta as 2nd argument")
         sys.exit(bwa_index(convert_fasta(args[1])))
 
+    if len(args) > 0 and args[0] == "minimap2-index":
+        assert len(args) == 2, ("must specify fasta as 2nd argument")
+        sys.exit(minimap2_index(convert_fasta(args[1])))
+
     if len(args) > 0 and args[0] == "c2t":
         sys.exit(convert_reads(args[1], args[2]))
 
@@ -489,6 +518,7 @@ def main(args=sys.argv[1:]):
         default=None, choices=('f', 'r'))
     p.add_argument('-p', '--interleaved', action='store_true', help='fastq files have 4 lines of read1 followed by 4 lines of read2 (e.g. seqtk mergepe output)')
     p.add_argument('--version', action='version', version='bwa-meth.py {}'.format(__version__))
+    p.add_argument('--minimap2', action='store_true', help='Use minimap2, for aligning long reads')
 
     p.add_argument("fastqs", nargs="+", help="bs-seq fastqs to align. Run"
             "multiple sets separated by commas, e.g. ... a_R1.fastq,b_R1.fastq"
@@ -499,11 +529,12 @@ def main(args=sys.argv[1:]):
     # for the 2nd file. use G => A and bwa's support for streaming.
     conv_fqs_cmd = convert_fqs(args.fastqs)
 
-    bwa_mem(args.reference, conv_fqs_cmd, ' '.join(map(str, pass_through_args)),
-            threads=args.threads,
-            rg=args.read_group or rname(*args.fastqs),
-            paired=(len(args.fastqs) == 2 or args.interleaved),
-            set_as_failed=args.set_as_failed)
+    if args.minimap2:
+        minimap2(args.reference, conv_fqs_cmd, threads=args.threads)
+    else:
+        bwa_mem(args.reference, conv_fqs_cmd,
+                threads=args.threads,
+                set_as_failed=args.set_as_failed)
 
 if __name__ == "__main__":
     main(sys.argv[1:])
